@@ -36,7 +36,7 @@ module Readability
     end
 
     def prepare_candidates
-      @html.css("script, style").each { |i| i.remove }
+      find_elements_by_names(@html.root, "script, style").each { |i| i.remove }
       remove_unlikely_candidates! if @remove_unlikely_candidates
       transform_misused_divs_into_paragraphs!
       
@@ -47,10 +47,10 @@ module Readability
     def make_html
       @html = Nokogiri::HTML(@input, nil, @options[:encoding])
       # In case document has no body, such as from empty string or redirect
-      @html = Nokogiri::HTML('<body />', nil, @options[:encoding]) if @html.css('body').length == 0
+      @html = Nokogiri::HTML('<body />', nil, @options[:encoding]) if find_elements_by_names(@html.root,'body').length == 0
 
       # Remove html comment tags
-      @html.xpath('//comment()').each { |i| i.remove }
+      get_comments(@html.root).each { |i| i.remove }
     end
 
     def images(content=nil, reload=false)
@@ -68,7 +68,7 @@ module Readability
       content       = @best_candidate[:elem] unless reload
 
       return list_images if content.nil?
-      elements = content.css("img").map(&:attributes)
+      elements = find_elements_by_name(content, "img").map(&:attributes)
 
         elements.each do |element|
           next unless element["src"]
@@ -127,7 +127,7 @@ module Readability
     }
 
     def title
-      title = @html.css("title").first
+      title = find_elements_by_name(@html.root, "title").first
       title ? title.text : nil
     end
 
@@ -137,7 +137,11 @@ module Readability
     def author
       # Let's grab this author:
       # <meta name="dc.creator" content="Finch - http://www.getfinch.com" />
-      author_elements = @html.xpath('//meta[@name = "dc.creator"]')
+      author_elements =  find_elements_by_name(@html.root, "meta").select do |el|
+          name_attr = el.attribute('name')           
+          name = name_attr.nil? ? nil : name_attr.value
+          name == 'dc.creator'
+        end
       unless author_elements.empty?
         author_elements.each do |element|
           if element['content']
@@ -149,7 +153,20 @@ module Readability
       # Now let's try to grab this
       # <span class="byline author vcard"><span>By</span><cite class="fn">Austin Fonacier</cite></span>
       # <div class="author">By</div><div class="author vcard"><a class="url fn" href="http://austinlivesinyoapp.com/">Austin Fonacier</a></div>
-      author_elements = @html.xpath('//*[contains(@class, "vcard")]//*[contains(@class, "fn")]')
+      author_elements = []
+      vcards =  get_elements(@html.root).select do |el|
+          cls_attr = el.attribute('class')           
+          cls = cls_attr.nil? ? nil : cls_attr.value
+          cls && cls.split.include?('vcard')
+        end
+      vcards.each do |vcard|
+        author_elements += get_elements(vcard).select do |el|
+            cls_attr = el.attribute('class')           
+            cls = cls_attr.nil? ? nil : cls_attr.value
+            cls && cls.split.include?('fn')
+          end
+      end
+      @html.xpath('//*[contains(@class, "vcard")]//*[contains(@class, "fn")]')
       unless author_elements.empty?
         author_elements.each do |element|
           if element.text
@@ -161,7 +178,11 @@ module Readability
       # Now let's try to grab this
       # <a rel="author" href="http://dbanksdesign.com">Danny Banks (rel)</a>
       # TODO: strip out the (rel)?
-      author_elements = @html.xpath('//a[@rel = "author"]')
+       author_elements =  find_elements_by_name(@html.root, "a").select do |el|
+          rel_attr = el.attribute('rel')           
+          rel = rel_attr.nil? ? nil : rel_attr.value
+          rel == 'author'
+        end
       unless author_elements.empty?
         author_elements.each do |element|
           if element.text
@@ -170,7 +191,11 @@ module Readability
         end
       end
 
-      author_elements = @html.xpath('//*[@id = "author"]')
+      author_elements =  get_elements(@html.root).select do |el|
+          id_attr = el.attribute('id')           
+          id = id_attr.nil? ? nil : id_attr.value
+          id == 'author'
+        end
       unless author_elements.empty?
         author_elements.each do |element|
           if element.text
@@ -247,21 +272,21 @@ module Readability
         debug("Candidate #{candidate[:elem].name}##{candidate[:elem][:id]}.#{candidate[:elem][:class]} with score #{candidate[:content_score]}")
       end
 
-      best_candidate = sorted_candidates.first || { :elem => @html.css("body").first, :content_score => 0 }
+      best_candidate = sorted_candidates.first || { :elem => find_elements_by_name(@html.root,"body").first, :content_score => 0 }
       debug("Best candidate #{best_candidate[:elem].name}##{best_candidate[:elem][:id]}.#{best_candidate[:elem][:class]} with score #{best_candidate[:content_score]}")
 
       best_candidate
     end
 
     def get_link_density(elem)
-      link_length = elem.css("a").map(&:text).join("").length
+      link_length = find_elements_by_name(elem, "a").map(&:text).join("").length
       text_length = elem.text.length
       link_length / text_length.to_f
     end
 
     def score_paragraphs(min_text_length)
       candidates = {}
-      @html.css("p,td").each do |elem|
+      find_elements_by_names(@html.root, "p,td").each do |elem|
         parent_node = elem.parent
         grand_parent_node = parent_node.respond_to?(:parent) ? parent_node.parent : nil
         inner_text = elem.text
@@ -336,7 +361,7 @@ module Readability
     end
 
     def remove_unlikely_candidates!
-      @html.css("*").each do |elem|
+      get_elements(@html.root).each do |elem|
         str = "#{elem[:class]}#{elem[:id]}"
         if str =~ REGEXES[:unlikelyCandidatesRe] && str !~ REGEXES[:okMaybeItsACandidateRe] && (elem.name.downcase != 'html') && (elem.name.downcase != 'body')
           debug("Removing unlikely candidate - #{str}")
@@ -346,7 +371,7 @@ module Readability
     end
 
     def transform_misused_divs_into_paragraphs!
-      @html.css("*").each do |elem|
+      get_elements(@html.root).each do |elem|
         if elem.name.downcase == "div"
           # transform <div>s that do not contain other block elements into <p>s
           if elem.inner_html !~ REGEXES[:divToPElementsRe]
@@ -366,17 +391,17 @@ module Readability
     end
 
     def sanitize(node, candidates, options = {})    
-      node.css("h1, h2, h3, h4, h5, h6").each do |header|
+      find_elements_by_names(node, "h1, h2, h3, h4, h5, h6").each do |header|
         header.remove if class_weight(header) < 0 || get_link_density(header) > 0.33
       end
 
-      node.css("form, object, iframe, embed").each do |elem|
+      find_elements_by_names(node, "form, object, iframe, embed").each do |elem|
         elem.remove
       end
 
       if @options[:remove_empty_nodes]
         # remove <p> tags that have no text content - this will also remove p tags that contain only images.
-        node.css("p").each do |elem|
+        find_elements_by_name(node, "p").each do |elem|
           elem.remove if elem.content.strip.empty?
         end
       end
@@ -396,7 +421,7 @@ module Readability
       replace_with_whitespace = Hash.new
       base_replace_with_whitespace.each { |tag| replace_with_whitespace[tag] = true }
 
-      ([node] + node.css("*")).each do |el|
+      ([node] + get_elements(node)).each do |el|
         # If element is in whitelist, delete all its attributes
         if whitelist[el.node_name]
           el.attributes.each { |a, x| el.delete(a) unless @options[:attributes] && @options[:attributes].include?(a.to_s) }
@@ -418,7 +443,7 @@ module Readability
 
     def clean_conditionally(node, candidates, selector)
       return unless @clean_conditionally
-      node.css(selector).each do |el|
+      find_elements_by_names(node, selector).each do |el|
         weight = class_weight(el)
         content_score = candidates[el] ? candidates[el][:content_score] : 0
         name = el.name.downcase
@@ -427,7 +452,7 @@ module Readability
           el.remove
           debug("Conditionally cleaned #{name}##{el[:id]}.#{el[:class]} with weight #{weight} and content score #{content_score} because score + content score was less than zero.")
         elsif el.text.count(",") < 10
-          counts = %w[p img li a embed input].inject({}) { |m, kind| m[kind] = el.css(kind).length; m }
+          counts = %w[p img li a embed input].inject({}) { |m, kind| m[kind] = find_elements_by_names(el, kind).length; m }
           counts["li"] -= 100
 
           content_length = el.text.strip.length  # Count the text length excluding any surrounding whitespace
@@ -465,5 +490,69 @@ module Readability
         end
       end
     end
+
+    def get_comments(node, result = [])
+      if (node.is_a?(Nokogiri::XML::Comment))
+        result << node
+      end
+
+      if (node)
+        node.children.each do |child|
+          get_comments(child, result)
+        end
+      end
+
+      result
+    end
+
+    def find_elements_by_name(node, name, result = [])
+      if (node.is_a?(Nokogiri::XML::Element) && node.name.downcase == name.downcase)
+        result << node
+      end
+
+      if (node)
+        node.children.each do |child|
+          find_elements_by_name(child, name, result)
+        end
+      end
+
+      result
+    end
+
+    def find_elements_by_names(node, names, result = [])
+      name_set = Set.new
+      if (names.is_a?(String))
+        name_set += names.split(",").collect{|name| name.downcase.strip}
+      elsif (names.is_a?(Array))
+        name_set += names.collect{|name| name.downcase.strip}
+      end
+
+      if (node.is_a?(Nokogiri::XML::Element) && name_set.include?(node.name.downcase.strip))
+        result << node
+      end
+
+      if (node)
+        node.children.each do |child|
+          find_elements_by_names(child, names, result)
+        end
+      end
+
+      result
+    end
+
+    def get_elements(node, result = [])
+      if (node.is_a?(Nokogiri::XML::Element))
+        result << node
+      end
+
+      if (node)
+        node.children.each do |child|
+          get_elements(child, result)
+        end
+      end
+
+      result
+    end
+
   end
 end
