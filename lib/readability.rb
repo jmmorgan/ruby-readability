@@ -1,6 +1,7 @@
 require 'rubygems'
 require 'nokogiri'
 require 'guess_html_encoding'
+require 'iconv'
 
 module Readability
   class Document
@@ -23,7 +24,12 @@ module Readability
       @input = input
 
       if RUBY_VERSION =~ /^1\.9\./ && !@options[:encoding]
-        @input = GuessHtmlEncoding.encode(@input, @options[:html_headers]) unless @options[:do_not_guess_encoding]
+        begin
+          @input = GuessHtmlEncoding.encode(@input, @options[:html_headers]) unless @options[:do_not_guess_encoding]
+        rescue => e
+          @input = last_ditch_encoding_effort(@input)
+          rasie e if @input.nil?
+        end
         @options[:encoding] = @input.encoding.to_s
       end
 
@@ -361,7 +367,7 @@ module Readability
     end
 
     def remove_unlikely_candidates!
-      get_elements(@html.root).each do |elem|
+      get_elements(@html.root, Nokogiri::XML::NodeSet.new(@html), false).each do |elem|
         str = "#{elem[:class]}#{elem[:id]}"
         if str =~ REGEXES[:unlikelyCandidatesRe] && str !~ REGEXES[:okMaybeItsACandidateRe] && (elem.name.downcase != 'html') && (elem.name.downcase != 'body')
           debug("Removing unlikely candidate - #{str}")
@@ -371,7 +377,7 @@ module Readability
     end
 
     def transform_misused_divs_into_paragraphs!
-      get_elements(@html.root).each do |elem|
+      get_elements(@html.root, Nokogiri::XML::NodeSet.new(@html), false).each do |elem|
         if elem.name.downcase == "div"
           # transform <div>s that do not contain other block elements into <p>s
           if elem.inner_html !~ REGEXES[:divToPElementsRe]
@@ -420,7 +426,6 @@ module Readability
       base_whitelist.each {|tag| whitelist[tag] = true }
       replace_with_whitespace = Hash.new
       base_replace_with_whitespace.each { |tag| replace_with_whitespace[tag] = true }
-
       ([node] + get_elements(node)).each do |el|
         # If element is in whitelist, delete all its attributes
         if whitelist[el.node_name]
@@ -491,35 +496,35 @@ module Readability
       end
     end
 
-    def get_comments(node, result = [])
-      if (node.is_a?(Nokogiri::XML::Comment))
+    def get_comments(node, result = Nokogiri::XML::NodeSet.new(@html), include_context_node = false)
+      if (include_context_node && node.is_a?(Nokogiri::XML::Comment))
         result << node
       end
 
       if (node)
         node.children.each do |child|
-          get_comments(child, result)
+          get_comments(child, result, true)
         end
       end
 
       result
     end
 
-    def find_elements_by_name(node, name, result = [])
-      if (node.is_a?(Nokogiri::XML::Element) && node.name.downcase == name.downcase)
+    def find_elements_by_name(node, name, result = Nokogiri::XML::NodeSet.new(@html), include_context_node = false)
+      if (include_context_node && node.is_a?(Nokogiri::XML::Element) && node.name.downcase == name.downcase)
         result << node
       end
 
       if (node)
         node.children.each do |child|
-          find_elements_by_name(child, name, result)
+          find_elements_by_name(child, name, result, true)
         end
       end
 
       result
     end
 
-    def find_elements_by_names(node, names, result = [])
+    def find_elements_by_names(node, names, result = Nokogiri::XML::NodeSet.new(@html), include_context_node = false)
       name_set = Set.new
       if (names.is_a?(String))
         name_set += names.split(",").collect{|name| name.downcase.strip}
@@ -527,32 +532,67 @@ module Readability
         name_set += names.collect{|name| name.downcase.strip}
       end
 
-      if (node.is_a?(Nokogiri::XML::Element) && name_set.include?(node.name.downcase.strip))
+      if (include_context_node && node.is_a?(Nokogiri::XML::Element) && name_set.include?(node.name.downcase.strip))
         result << node
       end
 
       if (node)
         node.children.each do |child|
-          find_elements_by_names(child, names, result)
+          find_elements_by_names(child, names, result, true)
         end
       end
 
       result
     end
 
-    def get_elements(node, result = [])
-      if (node.is_a?(Nokogiri::XML::Element))
+    def get_elements(node, result = Nokogiri::XML::NodeSet.new(@html), include_context_node = true)
+      if (include_context_node && node.is_a?(Nokogiri::XML::Element))
         result << node
       end
 
       if (node)
         node.children.each do |child|
-          get_elements(child, result)
+          get_elements(child, result, true)
         end
       end
 
       result
     end
 
+    private
+
+    COMMONLY_ENCOUNTERED_ENCODINGS = Set.new([
+      "ISO-8859-1",
+      "WINDOWS-1252",
+      # need to add more
+
+    ])
+    def last_ditch_encoding_effort(input)
+      result = nil
+      # Big hack for now.  Iterate through some commonly encountered encodings first.
+      common_encodings = Encoding.list.select{|enc| COMMONLY_ENCOUNTERED_ENCODINGS.include?(enc.name)}
+      common_encodings.each do |enc|
+        begin
+          result = Iconv.iconv("UTF-8", enc.name, input).first
+          break
+        rescue => e
+        end
+      end
+
+      # Then throw the kitchen sink
+      if (result.nil?)
+        common_encodings = Encoding.list.select{|enc| !COMMONLY_ENCOUNTERED_ENCODINGS.include?(enc.name)}
+        common_encodings.each do |enc|
+          begin
+            result = Iconv.iconv("UTF-8", enc.name, input).first
+            break
+          rescue => e
+          end
+        end
+      end
+
+
+      result
+    end
   end
 end
